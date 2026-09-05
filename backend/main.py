@@ -6,6 +6,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 import jwt
 from dotenv import load_dotenv
@@ -36,6 +38,16 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./bis_intelligence.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@bis-intelligence.local")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@12345")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+NVIDIA_API_URL = os.getenv(
+    "NVIDIA_API_URL",
+    "https://integrate.api.nvidia.com/v1/chat/completions",
+).strip()
+NVIDIA_MODEL = os.getenv(
+    "NVIDIA_MODEL",
+    "nvidia/nemotron-3-super-120b-a12b",
+).strip() or "nvidia/nemotron-3-super-120b-a12b"
+NVIDIA_TIMEOUT = int(os.getenv("NVIDIA_TIMEOUT", "90"))
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
@@ -323,6 +335,37 @@ def retrieve_chunks(s: Session, q: str, k: int = 8):
     if not rows:
         return []
 
+    # Product-specific BIS routing. TF-IDF alone can miss short queries such as
+    # "BIS standard applicable on helmet" because the demo corpus is small.
+    # For well-known product families, route directly to the relevant official
+    # standards before falling back to semantic similarity.
+    ql = q.lower()
+    priority_standards = []
+    if any(k in ql for k in ["helmet", "हेल्मेट", "हेलमेट", "हेल्मेट"]):
+        motorcycle = any(k in ql for k in [
+            "motorcycle", "motorbike", "motor cycle", "two wheeler",
+            "two-wheeler", "bike", "scooter", "दुपहिया", "दोनचाकी",
+            "मोटरसायकल", "मोटरसाइकिल"
+        ])
+        industrial = any(k in ql for k in [
+            "industrial", "construction", "factory", "worker", "workers",
+            "mine", "mining", "industry", "औद्योगिक", "कामगार", "निर्माण"
+        ])
+        bicycle = any(k in ql for k in [
+            "bicycle", "bike cycle", "cycling", "skateboard",
+            "roller skate", "सायकल", "साइकिल"
+        ])
+        if motorcycle:
+            priority_standards = ["IS 4151:2015"]
+        elif industrial:
+            priority_standards = ["IS 2925:1984"]
+        elif bicycle:
+            priority_standards = ["IS 18808:2025"]
+        else:
+            # Ambiguous "helmet" query: show the road-rider standard first,
+            # then distinguish industrial and bicycle helmets.
+            priority_standards = ["IS 4151:2015", "IS 2925:1984", "IS 18808:2025"]
+
     texts = [
         f"{doc.title} {doc.standard_number or ''} "
         f"{doc.category} {chunk.section or ''} {chunk.text}"
@@ -348,6 +391,23 @@ def retrieve_chunks(s: Session, q: str, k: int = 8):
     order = scores.argsort()[::-1]
 
     results = []
+    used = set()
+
+    # Deterministic product-to-standard matches outrank generic TF-IDF matches.
+    # This is what prevents a query about motorcycle helmets from being routed
+    # to an unrelated consumer-product document.
+    for standard in priority_standards:
+        for idx, (chunk, doc) in enumerate(rows):
+            if doc.standard_number == standard and doc.id not in used:
+                results.append({
+                    "chunk": chunk,
+                    "document": doc,
+                    "score": 0.99,
+                })
+                used.add(doc.id)
+                break
+        if len(results) >= k:
+            return results[:k]
 
     for idx in order:
         score = float(scores[idx])
@@ -356,6 +416,9 @@ def retrieve_chunks(s: Session, q: str, k: int = 8):
             continue
 
         chunk, doc = rows[idx]
+
+        if doc.id in used:
+            continue
 
         results.append({
             "chunk": chunk,
@@ -410,12 +473,6 @@ def evidence_payload(item):
 # Seed demo knowledge base
 # ---------------------------------------------------------
 def seed(s: Session):
-    """Create the admin account and seed a small evidence-first BIS KB.
-
-    Existing documents are preserved. New official seed records are added
-    only when their standard number is not already present, so restarting
-    the server does not duplicate knowledge.
-    """
     if not s.scalar(select(User).where(User.email == ADMIN_EMAIL)):
         s.add(
             User(
@@ -425,136 +482,107 @@ def seed(s: Session):
             )
         )
 
-    demo_records = []
-    path = DATA / "demo" / "standards.json"
-    if path.exists():
-        demo_records = json.loads(path.read_text(encoding="utf-8"))
+    # Original demo records are seeded only when the database is empty.
+    if not s.scalar(select(Document)):
+        path = DATA / "demo" / "standards.json"
+        if path.exists():
+            records = json.loads(path.read_text(encoding="utf-8"))
+            details = {
+                "IS 302 (Part 1):2008": "Safety requirements for household and similar electrical appliances; demo record.",
+                "IS 17043:2018": "Demo consumer product standard record.",
+                "IS 9845:1998": "Demo food-contact plastics record.",
+            }
+            for r in records:
+                content = details.get(r["standard"], "")
+                d = Document(
+                    title=r["standard"], standard_number=r["standard"],
+                    category=r["category"], version="Demo",
+                    source_url="https://www.bis.gov.in/",
+                    source_type=r["source_type"], status="CURRENT",
+                    content=content,
+                    content_hash=hashlib.sha256(content.encode()).hexdigest(),
+                    verified=False,
+                )
+                s.add(d); s.flush()
+                for i, piece in enumerate(chunk_text(content)):
+                    s.add(Chunk(document_id=d.id, text=piece, page=1, section=f"Demo section {i + 1}"))
 
-    demo_details = {
-        "IS 302 (Part 1):2008": (
-            "Safety requirements for household and similar electrical "
-            "appliances; demo record for electrical product retrieval."
-        ),
-        "IS 17043:2018": (
-            "Demo consumer product standard record used to demonstrate "
-            "metadata, versioning and evidence cards."
-        ),
-        "IS 9845:1998": (
-            "Demo food-contact plastics record used to demonstrate "
-            "product/material retrieval and compliance workflows."
-        ),
-    }
-
-    # Keep the original demo records for the prototype.
-    for r in demo_records:
-        standard = r["standard"]
-        if s.scalar(select(Document).where(Document.standard_number == standard)):
-            continue
-
-        content = demo_details.get(standard, "")
-        d = Document(
-            title=standard,
-            standard_number=standard,
-            category=r["category"],
-            version="Demo",
-            source_url="https://www.bis.gov.in/",
-            source_type=r["source_type"],
-            status="CURRENT",
-            content=content,
-            content_hash=hashlib.sha256(content.encode()).hexdigest(),
-            verified=False,
-        )
-        s.add(d)
-        s.flush()
-        for i, piece in enumerate(chunk_text(content)):
-            s.add(Chunk(
-                document_id=d.id,
-                text=piece,
-                page=1,
-                section=f"Demo section {i + 1}",
-            ))
-
-    # Official BIS evidence records used to make the first real product
-    # retrieval work. URLs point to BIS-hosted documents/pages.
-    official_records = [
+    # Authoritative BIS product mappings. These are deliberately explicit so
+    # the assistant can answer standard-applicability questions from evidence
+    # instead of guessing from a generic language model response.
+    authoritative = [
         {
-            "standard": "IS 17803:2022",
-            "title": "Potable Water Bottles (Metallic)",
-            "category": "Potable water bottles",
-            "version": "2022; Product Manual June 2025",
-            "source_url": "https://www.bis.gov.in/wp-content/uploads/2025/06/PM-IS-17803.pdf",
-            "source_type": "BIS Official Product Manual",
+            "standard": "IS 4151:2015",
+            "title": "Protective helmets for motorcycle riders – Specification (Fourth Revision)",
+            "category": "Protective helmets / two-wheeler riders",
+            "version": "2015",
+            "url": "https://www.bis.gov.in/is-4151-2015/?lang=en",
             "content": (
-                "IS 17803:2022 Potable Water Bottles (Metallic). "
-                "The BIS Product Manual states that the product is covered "
-                "under Scheme-I of the BIS Conformity Assessment Regulations, "
-                "2018. The scope covers potable water bottles with body material "
-                "of copper, stainless steel or aluminium. The licence scope can "
-                "include capacity and specified accessories. The product manual "
-                "lists possible tests including capacity, impact resistance, "
-                "shoulder strap strength, cord chain, leakage, lever/device, "
-                "stability and load tests. Sampling, test equipment and the "
-                "Scheme of Inspection and Testing are specified in the product "
-                "manual. The BIS Scheme-I listing also identifies IS 17803:2022 "
-                "under the Potable Water Bottles Quality Control Order. "
-                "For a stainless steel potable water bottle, IS 17803:2022 is "
-                "therefore a key standard to check, subject to the exact product "
-                "design, capacity and current BIS notifications."
+                "IS 4151:2015 specifies protective helmets for motorcycle riders and is the Indian Standard "
+                "for protective helmets for two-wheeler riders. It covers protective helmets for everyday use "
+                "by motorcycle and two-wheeler riders. The Ministry of Road Transport and Highways Helmet for "
+                "riders of Two Wheeler Motor Vehicles (Quality Control) Order, 2020 lists IS 4151:2015 and states "
+                "that covered goods shall conform to the corresponding Indian Standard and bear the Standard Mark "
+                "under a BIS licence; the Order commenced on 1 June 2021. Latest notified versions and amendments apply. "
+                "Keywords: helmet, motorcycle helmet, motorbike helmet, scooter helmet, two wheeler helmet, bike helmet, "
+                "हेल्मेट, हेलमेट, मोटरसाइकिल हेलमेट, दोपहिया हेलमेट, दुचाकी हेल्मेट.\n"
             ),
         },
         {
-            "standard": "IS 17526:2021",
-            "title": "Domestic Stainless Steel Vacuum Flask/Bottle",
-            "category": "Stainless steel vacuum flask/bottle",
-            "version": "2021; Product Manual December 2024",
-            "source_url": "https://www.bis.gov.in/wp-content/uploads/2024/12/PM-IS-17526-1.pdf",
-            "source_type": "BIS Official Product Manual",
+            "standard": "IS 2925:1984",
+            "title": "Specification for industrial safety helmets (Second Revision)",
+            "category": "Industrial safety helmets",
+            "version": "1984 (Second Revision)",
+            "url": "https://www.bis.gov.in/product-certification/products-under-compulsory-certification/scheme-i-mark-scheme/?lang=en",
             "content": (
-                "IS 17526:2021 Domestic Stainless Steel Vacuum Flask/Bottle. "
-                "This standard covers domestic vacuum insulated stainless steel "
-                "flasks or bottles used for storage and maintaining the temperature "
-                "of hot and cold liquids for drinking purposes. The BIS Product "
-                "Manual is reference material for certification under Scheme-I and "
-                "for prospective applicants seeking a BIS certification licence. "
-                "It specifies material requirements and product tests. Tests and "
-                "checks include capacity, heat retention, cold retention, impact, "
-                "leakage, staining and other requirements depending on the product. "
-                "The Insulated Flask, Bottles and Containers for Domestic Use "
-                "Quality Control Order, 2024 lists IS 17526:2021 for domestic "
-                "stainless steel vacuum flask/bottles. For a vacuum-insulated "
-                "stainless steel drinking bottle, this standard should be checked "
-                "along with the current QCO and BIS certification requirements."
+                "IS 2925:1984 specifies industrial safety helmets. It applies to safety helmets used for protection "
+                "against hazards such as impact from falling objects in industrial and work environments. BIS lists "
+                "IS 2925:1984 under Scheme-I compulsory certification products. It is not the motorcycle/two-wheeler "
+                "helmet standard; motorcycle riders are covered by IS 4151:2015. Keywords: industrial helmet, safety helmet, "
+                "construction helmet, factory helmet, worker helmet, औद्योगिक हेलमेट, कामगार हेल्मेट.\n"
+            ),
+        },
+        {
+            "standard": "IS 18808:2025",
+            "title": "Protective Helmet for Users of Bicycles, Skateboards and Roller Skates — Specification",
+            "category": "Bicycle / skateboard / roller-skate helmets",
+            "version": "2025",
+            "url": "https://www.services.bis.gov.in/php/BIS_2.0/bisconnect/sfile/sstore2/news_2025-03-03.pdf",
+            "content": (
+                "IS 18808:2025 specifies protective helmets for users of bicycles, skateboards and roller skates. "
+                "It is distinct from IS 4151:2015, which covers protective helmets for motorcycle/two-wheeler riders. "
+                "Keywords: bicycle helmet, cycling helmet, skateboard helmet, roller skate helmet, सायकल हेल्मेट, साइकिल हेलमेट.\n"
             ),
         },
     ]
 
-    for r in official_records:
-        standard = r["standard"]
-        if s.scalar(select(Document).where(Document.standard_number == standard)):
-            continue
-
-        content = normalize_text(r["content"])
-        d = Document(
-            title=r["title"],
-            standard_number=standard,
-            category=r["category"],
-            version=r["version"],
-            source_url=r["source_url"],
-            source_type=r["source_type"],
-            status="CURRENT",
-            content=content,
-            content_hash=hashlib.sha256(content.encode()).hexdigest(),
-            verified=True,
-        )
-        s.add(d)
-        s.flush()
-        for i, piece in enumerate(chunk_text(content, size=900, overlap=120)):
-            s.add(Chunk(
-                document_id=d.id,
-                text=piece,
-                page=1,
-                section=f"Product Manual evidence {i + 1}",
-            ))
+    for r in authoritative:
+        existing = s.scalar(select(Document).where(Document.standard_number == r["standard"]))
+        if existing:
+            # Upgrade an old placeholder record to authoritative metadata.
+            existing.title = r["title"]
+            existing.category = r["category"]
+            existing.version = r["version"]
+            existing.source_url = r["url"]
+            existing.source_type = "BIS Official"
+            existing.status = "CURRENT"
+            existing.content = r["content"]
+            existing.content_hash = hashlib.sha256(r["content"].encode()).hexdigest()
+            existing.verified = True
+            s.query(Chunk).filter(Chunk.document_id == existing.id).delete()
+            doc = existing
+        else:
+            doc = Document(
+                title=r["title"], standard_number=r["standard"],
+                category=r["category"], version=r["version"],
+                source_url=r["url"], source_type="BIS Official",
+                status="CURRENT", content=r["content"],
+                content_hash=hashlib.sha256(r["content"].encode()).hexdigest(),
+                verified=True,
+            )
+            s.add(doc); s.flush()
+        for i, piece in enumerate(chunk_text(r["content"], size=900, overlap=120)):
+            s.add(Chunk(document_id=doc.id, text=piece, page=1, section=f"Applicability {i + 1}"))
 
     s.commit()
 
@@ -574,6 +602,11 @@ class AuthIn(BaseModel):
 
 class AnalyzeIn(BaseModel):
     query: str
+    language: str = "en"
+
+
+class VoiceSearchIn(BaseModel):
+    transcript: str
     language: str = "en"
 
 
@@ -608,6 +641,9 @@ def health():
         "service": "bis-intelligence-api",
         "database": "connected",
         "rag": "chunk-tfidf",
+        "llm_provider": "NVIDIA NIM",
+        "llm_model": NVIDIA_MODEL,
+        "llm_configured": bool(NVIDIA_API_KEY),
     }
 
 
@@ -694,6 +730,197 @@ def me(u=Depends(current_user)):
 
 
 # ---------------------------------------------------------
+# Voice search API
+# ---------------------------------------------------------
+@app.post("/api/voice/search")
+def voice_search(
+    x: VoiceSearchIn,
+    s: Session = Depends(db),
+    u=Depends(current_user),
+):
+    """
+    Voice-to-search bridge.
+
+    The browser performs speech-to-text using the selected Indian locale
+    (en-IN, hi-IN or mr-IN). This endpoint receives the resulting transcript
+    and runs it through the same grounded BIS RAG pipeline as typed search.
+    No speech text is fabricated or silently translated.
+    """
+    transcript = x.transcript.strip()
+
+    if not transcript:
+        raise HTTPException(422, "Voice transcript is empty.")
+
+    language = x.language if x.language in translations else "en"
+
+    return analyze(
+        AnalyzeIn(query=transcript, language=language),
+        s,
+        u,
+    )
+
+
+# ---------------------------------------------------------
+# ---------------------------------------------------------
+# NVIDIA NIM answer generation
+# ---------------------------------------------------------
+
+def _nvidia_unavailable_message(language: str) -> str:
+    messages = {
+        "en": "NVIDIA AI is temporarily unavailable. No local or hardcoded answer was substituted. Please try Analyze again shortly.",
+        "hi": "NVIDIA AI इस समय अस्थायी रूप से उपलब्ध नहीं है। किसी स्थानीय या हार्डकोड उत्तर को विकल्प के रूप में उपयोग नहीं किया गया है। कृपया थोड़ी देर बाद फिर से Analyze करें।",
+        "mr": "NVIDIA AI सध्या तात्पुरते उपलब्ध नाही. स्थानिक किंवा हार्डकोड केलेले उत्तर पर्याय म्हणून वापरलेले नाही. कृपया थोड्या वेळाने पुन्हा Analyze करा.",
+    }
+    return messages.get(language, messages["en"])
+
+
+def nvidia_status():
+    return {
+        "configured": bool(NVIDIA_API_KEY),
+        "provider": "NVIDIA NIM",
+        "model": NVIDIA_MODEL,
+        "endpoint": NVIDIA_API_URL,
+        "timeout_seconds": NVIDIA_TIMEOUT,
+    }
+
+
+@app.get("/api/nvidia/status")
+def nvidia_status_endpoint():
+    return nvidia_status()
+
+
+def generate_nvidia_answer(query: str, language: str, evidence: list[dict]):
+    """Generate the final answer through NVIDIA NIM, grounded in retrieved BIS evidence."""
+    if not NVIDIA_API_KEY:
+        raise HTTPException(
+            503,
+            "NVIDIA API key is not configured. Add NVIDIA_API_KEY to backend/.env and restart the backend.",
+        )
+
+    language_name = {
+        "en": "English",
+        "hi": "Hindi",
+        "mr": "Marathi",
+    }.get(language, "English")
+
+    evidence_text = []
+    for i, item in enumerate(evidence[:8], 1):
+        ev = (item.get("evidence") or [{}])[0]
+        source = item.get("source") or {}
+        evidence_text.append(
+            f"BIS EVIDENCE {i}\n"
+            f"Standard: {item.get('standard') or 'Not specified'}\n"
+            f"Title: {item.get('title') or 'Not specified'}\n"
+            f"Category: {item.get('category') or 'Not specified'}\n"
+            f"Version: {item.get('version') or 'Not specified'}\n"
+            f"Status: {item.get('status') or 'Not specified'}\n"
+            f"Source title: {source.get('title') or item.get('title') or 'Not specified'}\n"
+            f"Source URL: {source.get('url') or 'Not specified'}\n"
+            f"Verified: {source.get('verified', False)}\n"
+            f"Evidence text: {ev.get('text') or 'No extracted text'}\n"
+        )
+
+    context = "\n\n---\n\n".join(evidence_text) if evidence_text else "No matching BIS evidence was retrieved."
+
+    system_prompt = f"""
+You are BIS Intelligence, an AI assistant for the Bureau of Indian Standards (BIS).
+Answer the user's question in {language_name}.
+
+ACCURACY RULES:
+1. Use the supplied BIS evidence as the primary source for BIS-specific claims.
+2. Never invent an IS number, QCO, licence requirement, test, fee, date, certification rule,
+   standard version, government rule, or source.
+3. If the supplied evidence does not establish a BIS-specific fact, explicitly say it could not
+   be verified from the available BIS evidence instead of guessing.
+4. Clearly distinguish a BIS Standard, Quality Control Order (QCO), BIS certification/licence,
+   testing requirement, and general guidance.
+5. If multiple evidence items conflict, state the conflict and do not silently choose one.
+6. For compliance questions, explain the practical next steps and identify what must be verified
+   from the latest official BIS/Government source.
+7. You are the final answer engine. Do not substitute a local hardcoded answer.
+8. Keep the answer concise but complete. Use bullets where helpful.
+""".strip()
+
+    user_prompt = f"""
+USER QUESTION:
+{query}
+
+RETRIEVED BIS EVIDENCE:
+{context}
+
+Provide the best-supported answer. For BIS-specific facts, cite the relevant evidence by naming
+its IS number/title when available. Do not claim that you performed a live web search.
+""".strip()
+
+    payload = {
+        "model": NVIDIA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "top_p": 0.7,
+        "max_tokens": 4096,
+        "stream": False,
+    }
+
+    request = Request(
+        NVIDIA_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    import time
+    delays = [1.5, 3.0, 6.0]
+    last_error = "NVIDIA API request failed."
+    last_status = None
+
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=NVIDIA_TIMEOUT) as response:
+                raw = response.read().decode("utf-8")
+                data = json.loads(raw)
+
+            choices = data.get("choices") or []
+            answer = ""
+            if choices:
+                answer = ((choices[0].get("message") or {}).get("content") or "").strip()
+
+            if not answer:
+                raise ValueError("NVIDIA returned an empty response.")
+
+            return answer
+
+        except HTTPError as exc:
+            last_status = exc.code
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = str(exc)
+            last_error = body[:700]
+            print(f"NVIDIA API error {exc.code}, attempt={attempt + 1}/3: {last_error}")
+            if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
+                time.sleep(delays[attempt])
+                continue
+            break
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            last_error = str(exc)
+            print(f"NVIDIA connection/response error, attempt={attempt + 1}/3: {last_error}")
+            if attempt < 2:
+                time.sleep(delays[attempt])
+                continue
+            break
+
+    print(f"All NVIDIA attempts failed; status={last_status}, error={last_error}")
+    raise HTTPException(503, _nvidia_unavailable_message(language))
+
+
+# ---------------------------------------------------------
 # Main RAG + compliance analysis
 # ---------------------------------------------------------
 @app.post("/api/compliance/analyze")
@@ -714,7 +941,6 @@ def analyze(
 
     hits = retrieve_chunks(s, q, k=8)
     intent = infer_intent(q)
-
     top_score = hits[0]["score"] if hits else 0
     confidence = confidence_from_score(top_score)
 
@@ -728,22 +954,27 @@ def analyze(
     )
     s.commit()
 
+    results = [evidence_payload(item) for item in hits]
+    nvidia_answer = generate_nvidia_answer(q, lang, results)
+
     if not hits or confidence == "LOW":
         return {
-            "status": "insufficient_evidence",
+            "status": "general_answer",
             "message": translations[lang]["insufficient"],
             "intent": intent,
             "confidence": confidence,
             "sources": [],
+            "grounding_sources": [item.get("source", {}) for item in results],
+            "nvidia_answer": nvidia_answer,
+            "answer": {
+                "headline": "NVIDIA answer",
+                "nvidia": nvidia_answer,
+                "roadmap": [],
+                "disclaimer": "NVIDIA generated this answer from the retrieved BIS evidence. Verify the latest official BIS/Government source before making a compliance decision.",
+            },
         }
 
-    results = [
-        evidence_payload(item)
-        for item in hits
-    ]
-
     top = results[0]
-
     roadmap = [
         "Identify the potentially applicable standard",
         "Verify the latest standard version and amendments",
@@ -761,6 +992,9 @@ def analyze(
         "intent": intent,
         "confidence": confidence,
         "results": results,
+        "nvidia_answer": nvidia_answer,
+        "grounding_sources": [item.get("source", {}) for item in results],
+        "nvidia_model": NVIDIA_MODEL,
         "answer": {
             "headline": translations[lang]["match"],
             "why": [
@@ -769,6 +1003,7 @@ def analyze(
                 "Page/section evidence is attached to each result",
                 "Only CURRENT documents participate in retrieval",
             ],
+            "nvidia": nvidia_answer,
             "roadmap": roadmap,
             "disclaimer": (
                 "Prototype information. Verify current applicability "
