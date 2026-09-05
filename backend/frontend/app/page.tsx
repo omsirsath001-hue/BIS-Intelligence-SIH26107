@@ -108,8 +108,13 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<any>(null);
-
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
   const [admin, setAdmin] = useState(false);
   const [stats, setStats] = useState<any>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -169,9 +174,48 @@ export default function Home() {
     }
   }
 
+  async function auth() {
+    setAuthError('');
+    setAuthNotice('');
+
+    try {
+      const r = await fetch(
+        `${API}${authMode === 'login' ? '/api/auth/login' : '/api/auth/register'}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, language: lang }),
+        }
+      );
+
+      const j = await r.json();
+
+      if (!r.ok) throw new Error(j.detail || 'Authentication failed.');
+
+      localStorage.setItem('bis_token', j.token);
+      setToken(j.token);
+      setUser(j.user);
+      setShowAuth(false);
+      setEmail('');
+      setPassword('');
+      setAuthError('');
+      setAuthNotice('');
+      setNotice(authMode === 'login' ? 'You are now signed in.' : 'Account created successfully.');
+    } catch (e: any) {
+      setAuthError(e.message || 'Authentication failed.');
+    }
+  }
+
+  function openAuth(mode: 'login' | 'register' = 'login') {
+    setAuthMode(mode);
+    setAuthError('');
+    setAuthNotice('');
+    setShowAuth(true);
+  }
+
   async function loadAdmin() {
     if (!token) {
-      window.location.href = '/login';
+      setShowAuth(true);
       return;
     }
 
@@ -315,7 +359,7 @@ export default function Home() {
             </button>
           ) : (
             <button
-              onClick={() => { window.location.href = '/login'; }}
+              onClick={() => openAuth('login')}
               className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-slate-900"
             >
               <LogIn size={15} className="mr-1 inline" />
@@ -564,7 +608,72 @@ export default function Home() {
         )}
       </section>
 
+      {showAuth && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-5 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0B172A] p-7 shadow-2xl">
+            <div className="flex justify-between">
+              <div>
+                <h2 className="text-2xl font-bold">
+                  {authMode === 'login' ? t.login : t.register}
+                </h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  Secure access to your BIS workspace
+                </p>
+              </div>
+              <button onClick={() => { setShowAuth(false); setAuthError(''); setAuthNotice(''); }}>
+                <X />
+              </button>
+            </div>
 
+            <div className="mt-6 space-y-3">
+              {authError && (
+                <div className="rounded-2xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-200">
+                  {authError}
+                </div>
+              )}
+
+              {authNotice && (
+                <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-3 text-sm text-emerald-200">
+                  {authNotice}
+                </div>
+              )}
+
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email"
+                className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
+              />
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                type="password"
+                placeholder="Password"
+                className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
+              />
+              <button
+                onClick={auth}
+                className="w-full rounded-2xl bg-blue-600 py-3 font-semibold"
+              >
+                Continue
+              </button>
+            </div>
+
+            <button
+              className="mt-4 text-sm text-blue-300"
+              onClick={() => {
+                setAuthMode(authMode === 'login' ? 'register' : 'login');
+                setAuthError('');
+                setAuthNotice('');
+              }}
+            >
+              {authMode === 'login'
+                ? 'Create a new account'
+                : 'Already have an account? Login'}
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
