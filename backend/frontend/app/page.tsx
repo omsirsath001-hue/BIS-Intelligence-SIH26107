@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search,
@@ -22,44 +22,11 @@ import {
   MapPin,
   ExternalLink,
   RefreshCw,
-  Mic,
-  MicOff,
 } from 'lucide-react';
 
 const API = 'http://127.0.0.1:8000';
 
 type View = 'search' | 'compliance' | 'evidence' | 'labs' | 'documents';
-
-type SpeechRecognitionEventLike = Event & {
-  results: {
-    [index: number]: {
-      [index: number]: { transcript: string; confidence?: number };
-      isFinal?: boolean;
-    };
-    length: number;
-  };
-};
-
-type SpeechRecognitionLike = {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  maxAlternatives: number;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
-  onstart: (() => void) | null;
-  onend: (() => void) | null;
-  onerror: ((event: { error?: string }) => void) | null;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-};
-
-declare global {
-  interface Window {
-    SpeechRecognition?: new () => SpeechRecognitionLike;
-    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
-  }
-}
 
 const copy: any = {
   en: {
@@ -141,16 +108,17 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<any>(null);
-
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
   const [admin, setAdmin] = useState(false);
   const [stats, setStats] = useState<any>(null);
   const [file, setFile] = useState<File | null>(null);
   const [notice, setNotice] = useState('');
-  const [isListening, setIsListening] = useState(false);
-  const [voiceStatus, setVoiceStatus] = useState('');
-  const [voiceError, setVoiceError] = useState('');
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   const t = copy[lang];
 
@@ -167,114 +135,7 @@ export default function Home() {
       .catch(() => {});
   }, []);
 
-  function toggleVoiceSearch() {
-    if (isListening) {
-      recognitionRef.current?.stop();
-      return;
-    }
-
-    const Recognition =
-      typeof window !== 'undefined'
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : undefined;
-
-    if (!Recognition) {
-      setVoiceError(
-        lang === 'hi'
-          ? 'इस ब्राउज़र में voice search उपलब्ध नहीं है। Chrome या Edge का उपयोग करें।'
-          : lang === 'mr'
-            ? 'या ब्राउझरमध्ये voice search उपलब्ध नाही. Chrome किंवा Edge वापरा.'
-            : 'Voice search is not available in this browser. Please use Chrome or Edge.'
-      );
-      return;
-    }
-
-    const recognition = new Recognition();
-    recognition.lang = lang === 'hi' ? 'hi-IN' : lang === 'mr' ? 'mr-IN' : 'en-IN';
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-
-    setVoiceError('');
-    setVoiceStatus(
-      lang === 'hi'
-        ? 'बोलिए…'
-        : lang === 'mr'
-          ? 'बोला…'
-          : 'Listening…'
-    );
-
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
-
-    recognition.onresult = (event) => {
-      let transcript = '';
-      for (let i = 0; i < event.results.length; i += 1) {
-        transcript += event.results[i]?.[0]?.transcript || '';
-      }
-
-      const cleaned = transcript.trim();
-      if (cleaned) {
-        setQuery(cleaned);
-        setVoiceStatus(cleaned);
-
-        const lastResult = event.results[event.results.length - 1];
-        // Keep the final transcript in the search box. The user explicitly
-        // submits it with the Analyze button so the same NVIDIA-backed API
-        // path is used for typed and voice queries.
-        if (lastResult?.isFinal) {
-          setVoiceStatus('');
-        }
-      }
-    };
-
-    recognition.onerror = (event) => {
-      setIsListening(false);
-      recognitionRef.current = null;
-
-      const messages: Record<string, string> = {
-        'not-allowed':
-          lang === 'hi'
-            ? 'माइक्रोफ़ोन की अनुमति दें और फिर कोशिश करें।'
-            : lang === 'mr'
-              ? 'मायक्रोफोनची परवानगी द्या आणि पुन्हा प्रयत्न करा.'
-              : 'Allow microphone access and try again.',
-        'no-speech':
-          lang === 'hi'
-            ? 'आवाज़ नहीं मिली। फिर से बोलें।'
-            : lang === 'mr'
-              ? 'आवाज ऐकू आली नाही. पुन्हा बोला.'
-              : 'No speech was detected. Please try again.',
-        network:
-          lang === 'hi'
-            ? 'Speech service/network error हुआ।'
-            : lang === 'mr'
-              ? 'Speech service/network त्रुटी आली.'
-              : 'Speech service/network error occurred.',
-      };
-
-      setVoiceError(messages[event.error || ''] || (event.error || 'Voice recognition failed.'));
-      setVoiceStatus('');
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      recognitionRef.current = null;
-      setVoiceStatus('');
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
-  }
-
-  useEffect(() => {
-    return () => {
-      recognitionRef.current?.abort();
-    };
-  }, []);
-
-  async function analyze(nextQuery = query, fromVoice = false) {
+  async function analyze(nextQuery = query) {
     if (!nextQuery.trim()) {
       setError('Please describe a product or requirement first.');
       return;
@@ -284,37 +145,20 @@ export default function Home() {
     setError('');
     setNotice('');
 
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 210000);
-
     try {
-      const endpoint = fromVoice ? '/api/voice/search' : '/api/compliance/analyze';
-      let r: Response;
-      for (let attempt = 1; attempt <= 8; attempt++) {
-        r = await fetch(`${API}${endpoint}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            ...(fromVoice ? { transcript: nextQuery } : { query: nextQuery }),
-            language: lang,
-          }),
-          signal: controller.signal,
-        });
-        if (r.status !== 503 || attempt === 8) break;
-        setError(`NVIDIA AI is temporarily busy. Automatically retrying (${attempt}/8)…`);
-        await new Promise(resolve => window.setTimeout(resolve, 12000));
-      }
+      const r = await fetch(`${API}/api/compliance/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          query: nextQuery,
+          language: lang,
+        }),
+      });
 
-      const raw = await r.text();
-      let j: any;
-      try {
-        j = raw ? JSON.parse(raw) : {};
-      } catch {
-        j = { detail: raw || 'Backend returned an invalid response.' };
-      }
+      const j = await r.json();
 
       if (!r.ok) {
         throw new Error(j.detail || 'Compliance analysis failed.');
@@ -324,20 +168,54 @@ export default function Home() {
       setData(j);
       setView('search');
     } catch (e: any) {
-      if (e?.name === 'AbortError') {
-        setError('The analysis took too long. Check the backend terminal for the NVIDIA error and make sure your NVIDIA API key/model are valid.');
-      } else {
-        setError(e.message || 'Backend is not reachable. Start FastAPI on port 8000.');
-      }
+      setError(e.message || 'Backend is not reachable. Start FastAPI on port 8000.');
     } finally {
-      window.clearTimeout(timeoutId);
       setLoading(false);
     }
   }
 
+  async function auth() {
+    setAuthError('');
+    setAuthNotice('');
+
+    try {
+      const r = await fetch(
+        `${API}${authMode === 'login' ? '/api/auth/login' : '/api/auth/register'}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, language: lang }),
+        }
+      );
+
+      const j = await r.json();
+
+      if (!r.ok) throw new Error(j.detail || 'Authentication failed.');
+
+      localStorage.setItem('bis_token', j.token);
+      setToken(j.token);
+      setUser(j.user);
+      setShowAuth(false);
+      setEmail('');
+      setPassword('');
+      setAuthError('');
+      setAuthNotice('');
+      setNotice(authMode === 'login' ? 'You are now signed in.' : 'Account created successfully.');
+    } catch (e: any) {
+      setAuthError(e.message || 'Authentication failed.');
+    }
+  }
+
+  function openAuth(mode: 'login' | 'register' = 'login') {
+    setAuthMode(mode);
+    setAuthError('');
+    setAuthNotice('');
+    setShowAuth(true);
+  }
+
   async function loadAdmin() {
     if (!token) {
-      window.location.href = '/login';
+      setShowAuth(true);
       return;
     }
 
@@ -481,7 +359,7 @@ export default function Home() {
             </button>
           ) : (
             <button
-              onClick={() => { window.location.href = '/login'; }}
+              onClick={() => openAuth('login')}
               className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-slate-900"
             >
               <LogIn size={15} className="mr-1 inline" />
@@ -523,21 +401,7 @@ export default function Home() {
                     onKeyDown={(e) => e.key === 'Enter' && analyze()}
                     placeholder={t.placeholder}
                     className="w-full bg-transparent py-4 outline-none placeholder:text-slate-500"
-                    aria-label={t.placeholder}
                   />
-                  <button
-                    type="button"
-                    onClick={toggleVoiceSearch}
-                    className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl transition ${
-                      isListening
-                        ? 'bg-red-500/20 text-red-300 ring-1 ring-red-400/40'
-                        : 'bg-cyan-400/10 text-cyan-300 hover:bg-cyan-400/20'
-                    }`}
-                    title={isListening ? 'Stop voice search' : 'Start voice search'}
-                    aria-label={isListening ? 'Stop voice search' : 'Start voice search'}
-                  >
-                    {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-                  </button>
                 </div>
 
                 <button
@@ -550,21 +414,6 @@ export default function Home() {
                 </button>
               </div>
             </div>
-
-            {(voiceStatus || voiceError) && (
-              <div
-                className={`mt-3 rounded-2xl border p-3 text-sm ${
-                  voiceError
-                    ? 'border-red-400/20 bg-red-400/10 text-red-200'
-                    : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  {voiceError ? <MicOff size={16} /> : <Mic size={16} />}
-                  <span>{voiceError || voiceStatus}</span>
-                </div>
-              </div>
-            )}
 
             {error && (
               <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-400/10 p-4 text-sm text-red-200">
@@ -759,7 +608,72 @@ export default function Home() {
         )}
       </section>
 
+      {showAuth && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-5 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0B172A] p-7 shadow-2xl">
+            <div className="flex justify-between">
+              <div>
+                <h2 className="text-2xl font-bold">
+                  {authMode === 'login' ? t.login : t.register}
+                </h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  Secure access to your BIS workspace
+                </p>
+              </div>
+              <button onClick={() => { setShowAuth(false); setAuthError(''); setAuthNotice(''); }}>
+                <X />
+              </button>
+            </div>
 
+            <div className="mt-6 space-y-3">
+              {authError && (
+                <div className="rounded-2xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-200">
+                  {authError}
+                </div>
+              )}
+
+              {authNotice && (
+                <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-3 text-sm text-emerald-200">
+                  {authNotice}
+                </div>
+              )}
+
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email"
+                className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
+              />
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                type="password"
+                placeholder="Password"
+                className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
+              />
+              <button
+                onClick={auth}
+                className="w-full rounded-2xl bg-blue-600 py-3 font-semibold"
+              >
+                Continue
+              </button>
+            </div>
+
+            <button
+              className="mt-4 text-sm text-blue-300"
+              onClick={() => {
+                setAuthMode(authMode === 'login' ? 'register' : 'login');
+                setAuthError('');
+                setAuthNotice('');
+              }}
+            >
+              {authMode === 'login'
+                ? 'Create a new account'
+                : 'Already have an account? Login'}
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -866,70 +780,19 @@ function Meta({ label, value }: any) {
   );
 }
 
-
-function GroundingSources({ sources }: { sources?: any[] }) {
-  if (!sources?.length) return null;
-  return (
-    <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4">
-      <div className="text-sm font-semibold text-slate-200">BIS evidence sources</div>
-      <div className="mt-2 space-y-2">
-        {sources.slice(0, 6).map((source: any, i: number) => (
-          <a key={`${source.url}-${i}`} href={source.url} target="_blank" rel="noreferrer" className="block text-xs text-blue-300 hover:underline">
-            {source.title || source.url}
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function Result({ data, checks }: any) {
-  if (data?.status === 'general_answer') {
-    return (
-      <div className="mt-8 space-y-4">
-        <div className="rounded-3xl border border-violet-400/20 bg-violet-400/5 p-7">
-          <div className="flex items-center gap-2 font-semibold text-violet-200">
-            <Sparkles size={18} />
-            NVIDIA general guidance
-          </div>
-          <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-200">
-            {data.nvidia_answer}
-          </div>
-          <GroundingSources sources={data.grounding_sources} />
-        </div>
-        <div className="rounded-2xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-100">
-          <div className="flex gap-2"><AlertTriangle size={18} className="shrink-0" />{data.message}</div>
-        </div>
-      </div>
-    );
-  }
-
   if (data?.status === 'insufficient_evidence') {
     return (
-      <div className="mt-8 space-y-4">
-        <div className="rounded-3xl border border-amber-400/20 bg-amber-400/5 p-7">
-          <div className="flex gap-3 text-amber-200">
-            <AlertTriangle />
-            <div>
-              <h2 className="font-bold">Insufficient authoritative evidence</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-300">
-                {data.message}
-              </p>
-            </div>
+      <div className="mt-8 rounded-3xl border border-amber-400/20 bg-amber-400/5 p-7">
+        <div className="flex gap-3 text-amber-200">
+          <AlertTriangle />
+          <div>
+            <h2 className="font-bold">Insufficient authoritative evidence</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-300">
+              {data.message}
+            </p>
           </div>
         </div>
-        {data?.nvidia_answer && (
-          <div className="rounded-3xl border border-violet-400/20 bg-violet-400/5 p-7">
-            <div className="flex items-center gap-2 font-semibold text-violet-200">
-              <Sparkles size={18} />
-              NVIDIA general guidance
-            </div>
-            <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-200">
-              {data.nvidia_answer}
-            </div>
-            <GroundingSources sources={data.grounding_sources} />
-          </div>
-        )}
       </div>
     );
   }
@@ -982,19 +845,6 @@ function Result({ data, checks }: any) {
               </div>
             ))}
           </div>
-
-          {data?.nvidia_answer && (
-            <div className="mt-5 rounded-2xl border border-violet-400/20 bg-violet-400/5 p-5">
-              <div className="flex items-center gap-2 font-semibold text-violet-200">
-                <Sparkles size={17} />
-                NVIDIA answer
-              </div>
-              <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-200">
-                {data.nvidia_answer}
-              </div>
-              <GroundingSources sources={data.grounding_sources} />
-            </div>
-          )}
 
           <div className="mt-5 rounded-2xl border border-blue-400/20 bg-blue-400/5 p-5">
             <div className="flex items-center gap-2 font-semibold">

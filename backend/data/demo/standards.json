@@ -1,0 +1,20 @@
+[
+  {
+    "standard": "IS 302 (Part 1):2008",
+    "category": "Electrical appliances",
+    "status": "demo",
+    "source_type": "Demo knowledge base"
+  },
+  {
+    "standard": "IS 17043:2018",
+    "category": "Consumer products",
+    "status": "demo",
+    "source_type": "Demo knowledge base"
+  },
+  {
+    "standard": "IS 9845:1998",
+    "category": "Food-contact plastics",
+    "status": "demo",
+    "source_type": "Demo knowledge base"
+  }
+]
