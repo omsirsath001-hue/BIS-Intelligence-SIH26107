@@ -24,11 +24,18 @@ import {
   RefreshCw,
   Mic,
   MicOff,
+  History,
 } from 'lucide-react';
 
 const API = 'http://127.0.0.1:8000';
 
-type View = 'search' | 'compliance' | 'evidence' | 'labs' | 'documents';
+type View =
+  | 'search'
+  | 'compliance'
+  | 'evidence'
+  | 'labs'
+  | 'documents'
+  | 'history';
 
 type SpeechRecognitionEventLike = Event & {
   results: {
@@ -151,6 +158,8 @@ export default function Home() {
   const [voiceStatus, setVoiceStatus] = useState('');
   const [voiceError, setVoiceError] = useState('');
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const [history, setHistory] = useState<any[]>([]);
+const [historyLoading, setHistoryLoading] = useState(false);
 
   const t = copy[lang];
 
@@ -334,6 +343,36 @@ export default function Home() {
       setLoading(false);
     }
   }
+  async function loadHistory() {
+  if (!token) {
+    setShowAuth(true);
+    return;
+  }
+
+  setHistoryLoading(true);
+  setError('');
+
+  try {
+    const r = await fetch(`${API}/api/compliance/history`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const j = await r.json();
+
+    if (!r.ok) {
+      throw new Error(j.detail || 'Unable to load query history.');
+    }
+
+    setHistory(j.history || []);
+    setView('history');
+  } catch (e: any) {
+    setError(e.message || 'Unable to load query history.');
+  } finally {
+    setHistoryLoading(false);
+  }
+}
 
   async function loadAdmin() {
     if (!token) {
@@ -433,11 +472,18 @@ export default function Home() {
             ['compliance', t.compliance, ClipboardCheck],
             ['evidence', t.evidence, FileText],
             ['labs', t.labs, FlaskConical],
+             ['history', 'History', History],
             ['documents', t.documents, BookOpen],
           ].map(([id, label, Icon]: any) => (
             <button
               key={id}
-              onClick={() => setView(id as View)}
+              onClick={() => {
+  if (id === 'history') {
+    loadHistory();
+  } else {
+    setView(id as View);
+  }
+}}
               className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm transition ${
                 view === id
                   ? 'bg-white/10 text-white'
@@ -719,7 +765,64 @@ export default function Home() {
             </div>
           </ModuleShell>
         )}
+{view === 'history' && (
+  <ModuleShell
+    icon={History}
+    title="Query History"
+    subtitle="Review your previous BIS standard searches and analysis results."
+  >
+    {historyLoading ? (
+      <div className="rounded-3xl border border-white/10 bg-white/[.05] p-8 text-center">
+        <div className="text-slate-300">Loading history...</div>
+      </div>
+    ) : history.length === 0 ? (
+      <EmptyState
+        icon={History}
+        title="No history yet"
+        text="Your BIS standard searches will appear here after you run an analysis."
+        action="Go to Find Standard"
+        onClick={() => setView('search')}
+      />
+    ) : (
+      <div className="space-y-4">
+        {history.map((item) => (
+          <div
+            key={item.id}
+            className="rounded-3xl border border-white/10 bg-white/[.05] p-6"
+          >
+            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div className="flex gap-4">
+                <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-blue-500/10 text-blue-300">
+                  <Search size={20} />
+                </div>
 
+                <div>
+                  <h3 className="font-semibold text-white">
+                    {item.query}
+                  </h3>
+
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-lg bg-blue-400/10 px-2 py-1 text-blue-300">
+                      {item.intent}
+                    </span>
+
+                    <span className="rounded-lg bg-emerald-400/10 px-2 py-1 text-emerald-300">
+                      {item.confidence}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-500">
+                {new Date(item.created_at).toLocaleString()}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+  </ModuleShell>
+)}
         {view === 'documents' && (
           <ModuleShell
             icon={BookOpen}

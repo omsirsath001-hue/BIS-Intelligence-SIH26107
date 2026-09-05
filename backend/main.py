@@ -16,8 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import (
-    create_engine, String, Text, Integer, Boolean, DateTime,
-    ForeignKey, select, or_
+    create_engine,
+    String,
+    Text,
+    Integer,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    select,
+    or_,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session, sessionmaker
 from pypdf import PdfReader
@@ -101,9 +108,7 @@ class Chunk(Base):
     __tablename__ = "chunks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    document_id: Mapped[int] = mapped_column(
-        ForeignKey("documents.id"), index=True
-    )
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
     text: Mapped[str] = mapped_column(Text)
     page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     section: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -138,9 +143,7 @@ def db():
 
 def hash_password(password: str, salt: Optional[bytes] = None):
     salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode(), salt, 120_000
-    )
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
     return salt.hex() + ":" + digest.hex()
 
 
@@ -255,29 +258,19 @@ translations = {
 def infer_intent(q: str):
     ql = q.lower()
 
-    if any(x in ql for x in [
-        "standard", "is ", "मानक", "स्टँडर्ड"
-    ]):
+    if any(x in ql for x in ["standard", "is ", "मानक", "स्टँडर्ड"]):
         return "FIND_STANDARD"
 
-    if any(x in ql for x in [
-        "certif", "licen", "प्रमाण", "लायसन्स"
-    ]):
+    if any(x in ql for x in ["certif", "licen", "प्रमाण", "लायसन्स"]):
         return "CHECK_CERTIFICATION"
 
-    if any(x in ql for x in [
-        "test", "testing", "lab", "परीक्षण", "प्रयोगशाळा"
-    ]):
+    if any(x in ql for x in ["test", "testing", "lab", "परीक्षण", "प्रयोगशाळा"]):
         return "TESTING_REQUIREMENTS"
 
-    if any(x in ql for x in [
-        "compare", "difference", "तुलना"
-    ]):
+    if any(x in ql for x in ["compare", "difference", "तुलना"]):
         return "STANDARD_COMPARISON"
 
-    if any(x in ql for x in [
-        "document", "pdf", "दस्तऐवज"
-    ]):
+    if any(x in ql for x in ["document", "pdf", "दस्तऐवज"]):
         return "DOCUMENT_EXPLANATION"
 
     return "GENERAL_BIS_QUERY"
@@ -425,6 +418,13 @@ def retrieve_chunks(s: Session, q: str, k: int = 8):
             "document": doc,
             "score": score,
         })
+        results.append(
+            {
+                "chunk": chunk,
+                "document": doc,
+                "score": score,
+            }
+        )
 
         if len(results) >= k:
             break
@@ -461,11 +461,13 @@ def evidence_payload(item):
             "url": doc.source_url,
             "verified": doc.verified,
         },
-        "evidence": [{
-            "section": chunk.section or "Extracted document",
-            "page": chunk.page,
-            "text": chunk.text[:800],
-        }],
+        "evidence": [
+            {
+                "section": chunk.section or "Extracted document",
+                "page": chunk.page,
+                "text": chunk.text[:800],
+            }
+        ],
     }
 
 
@@ -511,6 +513,60 @@ def seed(s: Session):
     # the assistant can answer standard-applicability questions from evidence
     # instead of guessing from a generic language model response.
     authoritative = [
+    demo_records = []
+    path = DATA / "demo" / "standards.json"
+    if path.exists():
+        demo_records = json.loads(path.read_text(encoding="utf-8"))
+
+    demo_details = {
+        "IS 302 (Part 1):2008": (
+            "Safety requirements for household and similar electrical "
+            "appliances; demo record for electrical product retrieval."
+        ),
+        "IS 17043:2018": (
+            "Demo consumer product standard record used to demonstrate "
+            "metadata, versioning and evidence cards."
+        ),
+        "IS 9845:1998": (
+            "Demo food-contact plastics record used to demonstrate "
+            "product/material retrieval and compliance workflows."
+        ),
+    }
+
+    # Keep the original demo records for the prototype.
+    for r in demo_records:
+        standard = r["standard"]
+        if s.scalar(select(Document).where(Document.standard_number == standard)):
+            continue
+
+        content = demo_details.get(standard, "")
+        d = Document(
+            title=standard,
+            standard_number=standard,
+            category=r["category"],
+            version="Demo",
+            source_url="https://www.bis.gov.in/",
+            source_type=r["source_type"],
+            status="CURRENT",
+            content=content,
+            content_hash=hashlib.sha256(content.encode()).hexdigest(),
+            verified=False,
+        )
+        s.add(d)
+        s.flush()
+        for i, piece in enumerate(chunk_text(content)):
+            s.add(
+                Chunk(
+                    document_id=d.id,
+                    text=piece,
+                    page=1,
+                    section=f"Demo section {i + 1}",
+                )
+            )
+
+    # Official BIS evidence records used to make the first real product
+    # retrieval work. URLs point to BIS-hosted documents/pages.
+    official_records = [
         {
             "standard": "IS 4151:2015",
             "title": "Protective helmets for motorcycle riders – Specification (Fourth Revision)",
@@ -583,6 +639,35 @@ def seed(s: Session):
             s.add(doc); s.flush()
         for i, piece in enumerate(chunk_text(r["content"], size=900, overlap=120)):
             s.add(Chunk(document_id=doc.id, text=piece, page=1, section=f"Applicability {i + 1}"))
+    for r in official_records:
+        standard = r["standard"]
+        if s.scalar(select(Document).where(Document.standard_number == standard)):
+            continue
+
+        content = normalize_text(r["content"])
+        d = Document(
+            title=r["title"],
+            standard_number=standard,
+            category=r["category"],
+            version=r["version"],
+            source_url=r["source_url"],
+            source_type=r["source_type"],
+            status="CURRENT",
+            content=content,
+            content_hash=hashlib.sha256(content.encode()).hexdigest(),
+            verified=True,
+        )
+        s.add(d)
+        s.flush()
+        for i, piece in enumerate(chunk_text(content, size=900, overlap=120)):
+            s.add(
+                Chunk(
+                    document_id=d.id,
+                    text=piece,
+                    page=1,
+                    section=f"Product Manual evidence {i + 1}",
+                )
+            )
 
     s.commit()
 
@@ -595,7 +680,7 @@ with SessionLocal() as s:
 # Request models
 # ---------------------------------------------------------
 class AuthIn(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     language: str = "en"
 
@@ -689,9 +774,7 @@ def register(x: RegisterIn, s: Session = Depends(db)):
 
 @app.post("/api/auth/login")
 def login(x: AuthIn, s: Session = Depends(db)):
-    u = s.scalar(
-        select(User).where(User.email == x.email)
-    )
+    u = s.scalar(select(User).where(User.email == x.email))
 
     if not u or not verify_password(
         x.password,
@@ -984,6 +1067,76 @@ def analyze(
         "Select a laboratory with required capability",
         "Submit through the applicable official BIS process",
         "Maintain evidence and monitor amendments",
+    results = [evidence_payload(item) for item in hits]
+
+    top = results[0]
+
+        roadmap = [
+        {
+            "step": 1,
+            "title": "Identify applicable Indian Standard",
+            "description": (
+                f"Potentially applicable standard: "
+                f"{top['standard'] or top['title']}."
+            ),
+        },
+        {
+            "step": 2,
+            "title": "Verify current standard and amendments",
+            "description": (
+                f"Current indexed version: {top['version'] or 'Not specified'}. "
+                "Verify the latest BIS publication before making a decision."
+            ),
+        },
+        {
+            "step": 3,
+            "title": "Check BIS certification or licensing",
+            "description": (
+                "Check the applicable BIS conformity assessment scheme, "
+                "Quality Control Order and current licensing requirements."
+            ),
+        },
+        {
+            "step": 4,
+            "title": "Check testing requirements",
+            "description": (
+                "Review the applicable product manual or standard for "
+                "required tests, sampling and inspection requirements."
+            ),
+        },
+        {
+            "step": 5,
+            "title": "Prepare required documentation",
+            "description": (
+                "Prepare product specifications, technical documents, "
+                "test reports and other documents required by the applicable "
+                "BIS process."
+            ),
+        },
+        {
+            "step": 6,
+            "title": "Identify suitable laboratory",
+            "description": (
+                "Select a laboratory with the required testing capability "
+                "after confirming the applicable test scope."
+            ),
+        },
+        {
+            "step": 7,
+            "title": "Follow the applicable BIS process",
+            "description": (
+                "Submit the required application and supporting documents "
+                "through the applicable official BIS process."
+            ),
+        },
+        {
+            "step": 8,
+            "title": "Monitor compliance",
+            "description": (
+                "Maintain evidence and monitor changes to standards, "
+                "amendments and applicable BIS notifications."
+            ),
+        },
     ]
 
     return {
@@ -997,6 +1150,17 @@ def analyze(
         "nvidia_model": NVIDIA_MODEL,
         "answer": {
             "headline": translations[lang]["match"],
+                        "standard": top["standard"],
+            "title": top["title"],
+            "category": top["category"],
+            "certification_check": (
+                "BIS certification/licensing should be verified "
+                "against the applicable Scheme, QCO and current BIS requirements."
+            ),
+            "testing_check": (
+                "Review the indexed BIS evidence for applicable tests "
+                "and inspection requirements."
+            ),
             "why": [
                 f"Retrieved evidence from {top['standard'] or top['title']}",
                 "The result is based on indexed document chunks",
@@ -1060,9 +1224,46 @@ def compliance_checklist(
             for i, label in enumerate(base)
         ],
         "disclaimer": (
-            "Checklist is an AI-assisted planning aid, "
-            "not a certification decision."
+            "Checklist is an AI-assisted planning aid, " "not a certification decision."
         ),
+    }
+
+
+# ---------------------------------------------------------
+# Query History
+# ---------------------------------------------------------
+@app.get("/api/compliance/history")
+def compliance_history(
+    s: Session = Depends(db),
+    u=Depends(current_user),
+):
+    if not u:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+        )
+
+    logs = list(
+        s.scalars(
+            select(QueryLog)
+            .where(QueryLog.user_id == u.id)
+            .order_by(QueryLog.id.desc())
+        ).all()
+    )
+
+    return {
+        "status": "success",
+        "count": len(logs),
+        "history": [
+            {
+                "id": log.id,
+                "query": log.query,
+                "intent": log.intent,
+                "confidence": log.confidence,
+                "created_at": log.created_at.isoformat(),
+            }
+            for log in logs
+        ],
     }
 
 
@@ -1169,25 +1370,13 @@ def admin_overview(
     logs = list(s.scalars(select(QueryLog)).all())
     users = list(s.scalars(select(User)).all())
 
-    low = sum(
-        1 for x in logs
-        if x.confidence == "LOW"
-    )
+    low = sum(1 for x in logs if x.confidence == "LOW")
 
     return {
         "documents": len(docs),
-        "current_documents": sum(
-            d.status == "CURRENT"
-            for d in docs
-        ),
-        "verified_documents": sum(
-            d.verified
-            for d in docs
-        ),
-        "obsolete_documents": sum(
-            d.status == "OBSOLETE"
-            for d in docs
-        ),
+        "current_documents": sum(d.status == "CURRENT" for d in docs),
+        "verified_documents": sum(d.verified for d in docs),
+        "obsolete_documents": sum(d.status == "OBSOLETE" for d in docs),
         "queries": len(logs),
         "low_confidence_queries": low,
         "users": len(users),
@@ -1200,11 +1389,7 @@ def admin_queries(
     u=Depends(require_admin),
 ):
     logs = list(
-        s.scalars(
-            select(QueryLog)
-            .order_by(QueryLog.id.desc())
-            .limit(50)
-        ).all()
+        s.scalars(select(QueryLog).order_by(QueryLog.id.desc()).limit(50)).all()
     )
 
     return [
@@ -1223,12 +1408,7 @@ def admin_docs(
     s: Session = Depends(db),
     u=Depends(require_admin),
 ):
-    docs = list(
-        s.scalars(
-            select(Document)
-            .order_by(Document.id.desc())
-        ).all()
-    )
+    docs = list(s.scalars(select(Document).order_by(Document.id.desc())).all())
 
     return [
         {
@@ -1310,16 +1490,12 @@ async def upload_document(
     pages = []
 
     for i, page in enumerate(reader.pages, 1):
-        txt = normalize_text(
-            page.extract_text() or ""
-        )
+        txt = normalize_text(page.extract_text() or "")
 
         if txt:
             pages.append((i, txt))
 
-    content = "\n\n".join(
-        text for _, text in pages
-    )
+    content = "\n\n".join(text for _, text in pages)
 
     if not content:
         raise HTTPException(
@@ -1330,36 +1506,26 @@ async def upload_document(
 
     # Try to detect an IS standard number.
     match = re.search(
-        r"\bIS\s*[0-9]{2,6}"
-        r"(?:\s*\([^)]*\))?"
-        r"(?:\s*:\s*[0-9]{4})?",
+        r"\bIS\s*[0-9]{2,6}" r"(?:\s*\([^)]*\))?" r"(?:\s*:\s*[0-9]{4})?",
         content,
         re.I,
     )
 
-    standard_number = (
-        match.group(0).strip()
-        if match
-        else None
-    )
+    standard_number = match.group(0).strip() if match else None
 
     # If the same hash is already indexed, return it.
-    existing = s.scalar(
-        select(Document).where(
-            Document.content_hash == digest
-        )
-    )
+    existing = s.scalar(select(Document).where(Document.content_hash == digest))
 
     if existing:
         return {
             "id": existing.id,
             "title": existing.title,
             "pages": len(pages),
-            "chunks": s.scalar(
-                select(Chunk)
-                .where(Chunk.document_id == existing.id)
-                .count()
-            ) if False else None,
+            "chunks": (
+                s.scalar(select(Chunk).where(Chunk.document_id == existing.id).count())
+                if False
+                else None
+            ),
             "standard_number": existing.standard_number,
             "verified": existing.verified,
             "duplicate": True,
